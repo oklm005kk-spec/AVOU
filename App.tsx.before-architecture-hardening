@@ -53,7 +53,7 @@ import * as Clipboard from "expo-clipboard";
 const SUPABASE_URL = "https://iurrbuqvjaifmkaggpbw.supabase.co";
 const SUPABASE_ANON_KEY =
   process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ??
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml1cnJidXF2amFpZm1rYWdncGJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5MDg0MTgsImV4cCI6MjEwNjQ4NDQxOH0.KEybIgMVHdOCtoTijZHXnG1kF93Uc5itWUH4j49mapU";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml1cnJidXF2amFpZm1rYWdncGJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5MDg0MTgsImV4cCI6MjEwNjQ4NDQxOH0.KEybIgMVHdOCtoTijZHXnG1kF93Uc5itWUH4j49mapU ";
 
 const supabase =
   SUPABASE_ANON_KEY.startsWith("COLLE_")
