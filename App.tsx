@@ -28,8 +28,10 @@ import * as Clipboard from "expo-clipboard";
  * - Aucun écran "Se connecter".
  * - Aucun système de création de compte. Le jeu est sans compte.
  * - Le créateur est le Maître de jeu.
- * - Le Maître de jeu contrôle les identités : révélées, cachées,
- *   ou décision à chaque tour.
+ * - Le Maître de jeu contrôle les identités : révélées ou cachées.
+ * - MODE INTENSE : option « Tentative de démasquage ». Après chaque tour,
+ *   tous les joueurs votent pour deviner l'auteur de la proposition choisie.
+ *   La cible vote aussi, puis le résultat est révélé avant le tour suivant.
  * - Le Maître de jeu contrôle Ordre / Désordre.
  * - Ordre = séquence fixe.
  * - Désordre = l'application choisit aléatoirement le prochain joueur.
@@ -77,14 +79,15 @@ type Phase =
   | "lobby"
   | "settings"
   | "orderChoice"
-  | "identityChoice"
   | "preparation"
   | "play"
   | "reveal"
+  | "demaskingVote"
+  | "demaskingResult"
   | "roundEnd"
   | "gameEnd";
 
-type IdentityMode = "reveal" | "hidden" | "choice";
+type IdentityMode = "reveal" | "hidden";
 type OrderMode = "order" | "disorder";
 type GameMode = "target" | "intense";
 
@@ -127,6 +130,12 @@ type GameState = {
   selectedProposalId: string | null;
   revealed: boolean;
 
+  // Tentative de démasquage — uniquement après un tour Intense.
+  demaskingEnabled: boolean;
+  demaskingVotes: Record<string, string>;
+  demaskingResult: string | null;
+  demaskingTie: boolean;
+
   score: Record<string, number>;
   stateVersion: number;
 
@@ -139,7 +148,7 @@ type Action =
   | { type: "JOIN"; player: Player }
   | { type: "START_SETUP"; playerId: string }
   | { type: "SET_IDENTITY_MODE"; playerId: string; mode: IdentityMode }
-  | { type: "SET_ROUND_IDENTITY"; playerId: string; mode: "reveal" | "hidden" }
+  | { type: "SET_DEMASKING_ENABLED"; playerId: string; enabled: boolean }
   | { type: "SET_ORDER"; playerId: string; mode: OrderMode }
   | { type: "SET_GAME_MODE"; playerId: string; mode: GameMode }
   | { type: "UPDATE_GAME_SETTINGS"; playerId: string; identityMode: IdentityMode; gameMode: GameMode; orderMode: OrderMode }
@@ -160,6 +169,8 @@ type Action =
   | { type: "SELECT_PROPOSAL"; playerId: string; proposalId: string }
   | { type: "REVEAL_PROPOSAL"; playerId: string }
   | { type: "NEXT_TURN"; playerId: string }
+  | { type: "SUBMIT_DEMASKING_VOTE"; playerId: string; authorId: string }
+  | { type: "CONTINUE_AFTER_DEMASKING"; playerId: string }
   | { type: "NEXT_ROUND"; playerId: string }
   | { type: "LEAVE"; playerId: string }
   | { type: "DISCONNECT_PLAYER"; playerId: string; targetPlayerId: string }
@@ -230,6 +241,11 @@ function makeInitialState(code: string, host: Player): GameState {
 
     selectedProposalId: null,
     revealed: false,
+
+    demaskingEnabled: false,
+    demaskingVotes: {},
+    demaskingResult: null,
+    demaskingTie: false,
 
     score: { [host.id]: 0 },
     stateVersion: 1,
@@ -346,15 +362,16 @@ function reducer(state: GameState, action: Action): GameState {
       };
     }
 
-    case "SET_ROUND_IDENTITY": {
+    case "SET_DEMASKING_ENABLED": {
       if (action.playerId !== state.hostId) return state;
-      if (state.identityMode !== "choice") return state;
-      if (state.phase !== "settings" && state.phase !== "identityChoice") return state;
-
+      if (state.gameMode !== "intense") return { ...state, demaskingEnabled: false };
+      if (!["lobby", "settings", "orderChoice", "preparation", "play", "reveal", "demaskingVote", "demaskingResult"].includes(state.phase)) return state;
       return {
         ...state,
-        roundIdentity: action.mode,
-        phase: state.phase === "identityChoice" ? "preparation" : "orderChoice",
+        demaskingEnabled: action.enabled,
+        demaskingVotes: {},
+        demaskingResult: null,
+        demaskingTie: false,
       };
     }
 
@@ -364,9 +381,13 @@ function reducer(state: GameState, action: Action): GameState {
       if (state.players.length < minimumPlayersForMode(action.mode)) return state;
 
       const modeChanged = state.gameMode !== action.mode;
+      const nextIdentityMode: IdentityMode = action.mode === "target" ? "reveal" : state.identityMode;
       return {
         ...state,
         gameMode: action.mode,
+        identityMode: nextIdentityMode,
+        roundIdentity: action.mode === "target" ? "reveal" : state.roundIdentity,
+        demaskingEnabled: action.mode === "target" ? false : state.demaskingEnabled,
         ...(modeChanged && !["lobby", "settings", "orderChoice"].includes(state.phase)
           ? {
               phase: "preparation" as const,
@@ -387,17 +408,24 @@ function reducer(state: GameState, action: Action): GameState {
       if (state.players.length < minimumPlayersForMode(action.gameMode)) return state;
 
       const modeChanged = state.gameMode !== action.gameMode;
+      const nextIdentityMode: IdentityMode = action.gameMode === "target" ? "reveal" : action.identityMode;
 
       return {
         ...state,
-        identityMode: action.identityMode,
+        identityMode: nextIdentityMode,
         roundIdentity:
-          action.identityMode === "hidden"
-            ? "hidden"
-            : action.identityMode === "reveal"
-              ? "reveal"
-              : state.roundIdentity,
+          action.gameMode === "target"
+            ? "reveal"
+            : action.identityMode === "hidden"
+              ? "hidden"
+              : action.identityMode === "reveal"
+                ? "reveal"
+                : state.roundIdentity,
         gameMode: action.gameMode,
+        demaskingEnabled: action.gameMode === "target" ? false : state.demaskingEnabled,
+        demaskingVotes: {},
+        demaskingResult: null,
+        demaskingTie: false,
         orderMode: action.orderMode,
         ...(modeChanged && !["lobby", "settings", "orderChoice"].includes(state.phase)
           ? {
@@ -429,6 +457,9 @@ function reducer(state: GameState, action: Action): GameState {
         targetPlayerId: null,
         proposals: [],
         submittedForTurn: [],
+        demaskingVotes: {},
+        demaskingResult: null,
+        demaskingTie: false,
       };
     }
 
@@ -543,6 +574,18 @@ function reducer(state: GameState, action: Action): GameState {
       if (action.playerId !== expectedPlayer) return state;
       if (!state.revealed) return state;
 
+      // En Mode Intense, la tentative de démasquage se déclenche
+      // immédiatement après l'exécution/la réponse.
+      if (state.gameMode === "intense" && state.demaskingEnabled) {
+        return {
+          ...state,
+          phase: "demaskingVote",
+          demaskingVotes: {},
+          demaskingResult: null,
+          demaskingTie: false,
+        };
+      }
+
       let nextIndex = 0;
       let nextId = state.players[0]?.id ?? state.currentPlayerId;
 
@@ -555,13 +598,9 @@ function reducer(state: GameState, action: Action): GameState {
         nextId = next.id;
       }
 
-      // IMPORTANT:
-      // Every new turn starts with a completely fresh proposal set.
-      // If the host chose "Décision à chaque tour", the host decides
-      // the identity visibility before the next turn begins.
       return {
         ...state,
-        phase: state.identityMode === "choice" ? "identityChoice" : "preparation",
+        phase: "preparation",
         turnIndex: nextIndex,
         currentPlayerId: nextId,
         targetPlayerId: null,
@@ -569,12 +608,78 @@ function reducer(state: GameState, action: Action): GameState {
         submittedForTurn: [],
         selectedProposalId: null,
         revealed: false,
+        demaskingVotes: {},
+        demaskingResult: null,
+        demaskingTie: false,
         roundIdentity:
           state.identityMode === "hidden"
             ? "hidden"
-            : state.identityMode === "reveal"
-              ? "reveal"
-              : state.roundIdentity,
+            : "reveal",
+      };
+    }
+
+    case "SUBMIT_DEMASKING_VOTE": {
+      if (state.phase !== "demaskingVote") return state;
+      if (state.gameMode !== "intense" || !state.demaskingEnabled) return state;
+      if (!state.players.some((p) => p.id === action.playerId)) return state;
+      if (state.demaskingVotes[action.playerId]) return state;
+
+      const authors = Array.from(new Set(
+        state.proposals
+          .filter((p) => p.authorId !== state.currentPlayerId)
+          .map((p) => p.authorId)
+      ));
+      if (!authors.includes(action.authorId)) return state;
+
+      const votes = { ...state.demaskingVotes, [action.playerId]: action.authorId };
+      if (Object.keys(votes).length < state.players.length) {
+        return { ...state, demaskingVotes: votes };
+      }
+
+      const counts: Record<string, number> = {};
+      authors.forEach((id) => { counts[id] = 0; });
+      Object.values(votes).forEach((authorId) => { counts[authorId] = (counts[authorId] ?? 0) + 1; });
+      const maxVotes = Math.max(...Object.values(counts));
+      const winners = authors.filter((id) => counts[id] === maxVotes);
+
+      return {
+        ...state,
+        demaskingVotes: votes,
+        demaskingResult: winners.length === 1 ? winners[0] : null,
+        demaskingTie: winners.length !== 1,
+        phase: "demaskingResult",
+      };
+    }
+
+    case "CONTINUE_AFTER_DEMASKING": {
+      if (state.phase !== "demaskingResult") return state;
+      if (action.playerId !== state.currentPlayerId) return state;
+
+      let nextIndex = 0;
+      let nextId = state.players[0]?.id ?? state.currentPlayerId;
+      if (state.orderMode === "order") {
+        nextIndex = (state.turnIndex + 1) % state.players.length;
+        nextId = state.players[nextIndex]?.id ?? state.currentPlayerId;
+      } else {
+        const next = randomNextPlayer(state);
+        nextIndex = next.index;
+        nextId = next.id;
+      }
+
+      return {
+        ...state,
+        phase: "preparation",
+        turnIndex: nextIndex,
+        currentPlayerId: nextId,
+        targetPlayerId: null,
+        proposals: [],
+        submittedForTurn: [],
+        selectedProposalId: null,
+        revealed: false,
+        demaskingVotes: {},
+        demaskingResult: null,
+        demaskingTie: false,
+        roundIdentity: state.identityMode === "hidden" ? "hidden" : "reveal",
       };
     }
 
@@ -609,7 +714,9 @@ function reducer(state: GameState, action: Action): GameState {
       const activeTurn =
         state.phase === "preparation" ||
         state.phase === "play" ||
-        state.phase === "reveal";
+        state.phase === "reveal" ||
+        state.phase === "demaskingVote" ||
+        state.phase === "demaskingResult";
 
       const cannotLeave =
         activeTurn &&
@@ -654,7 +761,7 @@ const TEXT: Record<Lang, Record<string, string>> = {
     guest: "JOUER SANS COMPTE",
     create: "CRÉER UNE PARTIE",
     join: "REJOINDRE",
-    space: "MON ESPACE",
+    space: "RÈGLES DU JEU",
     language: "LANGUE",
     name: "Ton prénom ou pseudo",
     code: "Code de partie",
@@ -690,7 +797,6 @@ const TEXT: Record<Lang, Record<string, string>> = {
     identities: "Identités",
     revealed: "👁️ Identités révélées",
     hidden: "🙈 Identités cachées",
-    choice: "🎲 Décision à chaque tour",
     order: "ORDRE",
     disorder: "DÉSORDRE",
     orderHelp: "Ordre : la séquence des joueurs reste fixe.",
@@ -751,7 +857,6 @@ const TEXT: Record<Lang, Record<string, string>> = {
     identities: "Identities",
     revealed: "👁️ Identities revealed",
     hidden: "🙈 Identities hidden",
-    choice: "🎲 Decide every turn",
     order: "ORDER",
     disorder: "DISORDER",
     orderHelp: "Order: the player sequence stays fixed.",
@@ -805,7 +910,6 @@ const TEXT: Record<Lang, Record<string, string>> = {
     identities: "Identidades",
     revealed: "👁️ Identidades visibles",
     hidden: "🙈 Identidades ocultas",
-    choice: "🎲 Decidir cada turno",
     order: "ORDEN",
     disorder: "DESORDEN",
     orderHelp: "El orden permanece fijo.",
@@ -866,7 +970,6 @@ const TEXT: Record<Lang, Record<string, string>> = {
     identities: "Identità",
     revealed: "👁️ Identità rivelate",
     hidden: "🙈 Identità nascoste",
-    choice: "🎲 Decidi ogni turno",
     order: "ORDINE",
     disorder: "DISORDINE",
     orderHelp: "La sequenza resta fissa.",
@@ -925,7 +1028,6 @@ const TEXT: Record<Lang, Record<string, string>> = {
     identities: "Identitäten",
     revealed: "👁️ Identitäten sichtbar",
     hidden: "🙈 Identitäten verborgen",
-    choice: "🎲 Jede Runde entscheiden",
     order: "ORDNUNG",
     disorder: "CHAOS",
     orderHelp: "Die Reihenfolge bleibt fest.",
@@ -1854,12 +1956,150 @@ export default function App() {
   function renderSpace() {
     return (
       <ScrollView contentContainerStyle={styles.scroll}>
-        <Text style={styles.screenTitle}>{t.space}</Text>
+        <Text style={styles.screenTitle}>📖 {t.space}</Text>
 
-        <View style={styles.spaceCard}>
-          <Text style={styles.spaceAvatar}>{avatar}</Text>
-          <Text style={styles.spaceName}>{name || "Joueur AVOU"}</Text>
-          <Text style={styles.spaceSub}>Compte facultatif • progression locale</Text>
+        <View style={styles.goodCard}>
+          <Text style={styles.goodEmoji}>🎯</Text>
+          <Text style={styles.goodTitle}>LES RÈGLES D’AVOU</Text>
+          <Text style={styles.goodText}>
+            Tout est expliqué ici pour que chaque partie soit simple, claire et sans ambiguïté.
+          </Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>🎯 MODE CIBLE</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleTitle}>À partir de 2 joueurs</Text>
+          <Text style={styles.ruleText}>
+            Le joueur dont c’est le tour choisit un autre joueur comme cible.
+            Il lui propose ensuite une seule chose : une ACTION ou une VÉRITÉ.
+          </Text>
+          <Text style={styles.ruleText}>
+            La cible voit uniquement le type de proposition avant de choisir.
+            Elle choisit, puis le contenu est révélé. La cible réalise l’Action ou répond à la Vérité.
+          </Text>
+          <Text style={styles.ruleText}>
+            Il n’y a pas de choix « Jouer ou Cibler » : en Mode Cible, le joueur actif cible directement un autre joueur.
+          </Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>🔥 MODE INTENSE</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleTitle}>À partir de 3 joueurs</Text>
+          <Text style={styles.ruleText}>
+            Tous les autres joueurs proposent une ACTION et une VÉRITÉ pour la cible.
+          </Text>
+          <Text style={styles.ruleText}>
+            La cible voit uniquement les dos des propositions et leur type ACTION ou VÉRITÉ.
+            Elle ne voit pas leur contenu avant son choix.
+          </Text>
+          <Text style={styles.ruleText}>
+            La cible choisit une seule proposition. Son contenu est alors révélé, puis elle réalise l’Action ou répond à la Vérité.
+          </Text>
+          <Text style={styles.ruleText}>
+            Toutes les propositions du tour sont ensuite supprimées. Il faut de nouvelles propositions au tour suivant.
+          </Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>🕵️ TENTATIVE DE DÉMASQUAGE — MODE INTENSE</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleTitle}>Option activable par le Maître de jeu</Text>
+          <Text style={styles.ruleText}>
+            Après chaque tour Intense, une tentative de démasquage peut être activée. Tous les joueurs votent pour deviner qui a écrit la proposition choisie. La cible vote aussi.
+          </Text>
+          <Text style={styles.ruleText}>
+            Pendant le vote, les auteurs restent cachés. Une fois que tout le monde a voté, le résultat est révélé, puis le tour suivant commence.
+          </Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>👥 NOMBRE DE JOUEURS</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleTitle}>2 joueurs</Text>
+          <Text style={styles.ruleText}>Le Mode Cible est disponible. Le Mode Intense n’est pas disponible.</Text>
+          <Text style={styles.ruleTitle}>3 joueurs ou plus</Text>
+          <Text style={styles.ruleText}>Les deux modes sont disponibles. Le Maître de jeu choisit le mode.</Text>
+          <Text style={styles.ruleTitle}>De 3 à 2 joueurs</Text>
+          <Text style={styles.ruleText}>Si la partie est en Mode Intense, elle passe automatiquement en Mode Cible.</Text>
+          <Text style={styles.ruleTitle}>De 2 à 3 joueurs</Text>
+          <Text style={styles.ruleText}>Le Mode Intense devient disponible, mais la partie ne bascule pas automatiquement dessus.</Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>👁️ IDENTITÉS</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleTitle}>Mode Cible : toujours révélées</Text>
+          <Text style={styles.ruleText}>
+            En Mode Cible, les identités sont toujours révélées. Aucun réglage pour les cacher n’apparaît dans ce mode.
+          </Text>
+          <Text style={styles.ruleTitle}>Mode Intense</Text>
+          <Text style={styles.ruleText}>
+            Le Maître de jeu peut choisir : identités révélées ou identités cachées.
+          </Text>
+          <Text style={styles.ruleTitle}>Aucun vote</Text>
+          <Text style={styles.ruleText}>
+            Les réglages d’identité sont décidés par le Maître de jeu, pas par un vote des joueurs. En Mode Intense, le Maître de jeu peut aussi activer la « Tentative de démasquage ».
+          </Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>👑 MAÎTRE DE JEU</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleText}>
+            Le créateur de la partie est le Maître de jeu. Il contrôle les réglages de la partie et choisit le mode lorsqu’il y a plusieurs possibilités.
+          </Text>
+          <Text style={styles.ruleText}>
+            Il peut également gérer les joueurs, accepter ou refuser une demande de rejoindre et modifier les réglages prévus pour le Maître de jeu.
+          </Text>
+          <Text style={styles.ruleText}>
+            Si le Maître de jeu quitte la partie, un nouveau Maître de jeu est automatiquement désigné parmi les joueurs restants. La partie, le code et le tour en cours continuent.
+          </Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>🔢 ORDRE / DÉSORDRE</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleTitle}>ORDRE</Text>
+          <Text style={styles.ruleText}>Les joueurs passent dans un ordre fixe.</Text>
+          <Text style={styles.ruleTitle}>DÉSORDRE</Text>
+          <Text style={styles.ruleText}>L’application choisit aléatoirement le prochain joueur, en évitant autant que possible de reprendre immédiatement le même joueur.</Text>
+          <Text style={styles.ruleText}>Le choix ORDRE / DÉSORDRE appartient au Maître de jeu.</Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>🔒 CE QUI RESTE CACHÉ</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleText}>
+            Dans le Mode Intense, la cible ne voit jamais le contenu des propositions avant d’avoir choisi. Elle voit uniquement leur type.
+          </Text>
+          <Text style={styles.ruleText}>
+            Les propositions non choisies ne sont pas conservées pour plus tard. Elles sont supprimées à la fin du tour.
+          </Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>🚪 REJOINDRE OU QUITTER</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleText}>
+            Un joueur peut rejoindre une partie avec le code de la salle, après acceptation du Maître de jeu. Une arrivée en cours de partie ne redémarre pas la partie.
+          </Text>
+          <Text style={styles.ruleText}>
+            Un joueur peut quitter la partie. Si le nombre de joueurs reste suffisant, la partie continue.
+          </Text>
+          <Text style={styles.ruleText}>
+            Le joueur actif ou la cible ne peut pas quitter pendant un tour actif.
+          </Text>
+          <Text style={styles.ruleText}>
+            À un seul joueur restant, la partie s’arrête.
+          </Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>💬 MESSAGES PRIVÉS</Text>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleText}>
+            Chaque joueur peut envoyer un message privé à un autre joueur à tout moment dans la salle. Seuls l’expéditeur et le destinataire voient la conversation.
+          </Text>
+        </View>
+
+        <View style={styles.goodCard}>
+          <Text style={styles.goodEmoji}>✨</Text>
+          <Text style={styles.goodTitle}>UNE RÈGLE SIMPLE</Text>
+          <Text style={styles.goodText}>
+            Chaque tour recommence avec de nouvelles propositions. Rien n’est gardé pour un tour suivant.
+          </Text>
         </View>
 
         <Button label={t.back} onPress={() => setScreen("home")} variant="outline" />
@@ -1965,43 +2205,44 @@ export default function App() {
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.screenTitle}>{t.settings}</Text>
 
-        <Text style={styles.sectionTitle}>{t.identities}</Text>
-        <Text style={styles.helper}>
-          Seul le Maître de jeu décide. Il n'y a aucun vote.
-        </Text>
-
-        {(
-          [
-            ["reveal", t.revealed],
-            ["hidden", t.hidden],
-            ["choice", t.choice],
-          ] as [IdentityMode, string][]
-        ).map(([mode, label]) => (
-          <TouchableOpacity
-            key={mode}
-            disabled={!isHost}
-            onPress={() =>
-              dispatch({
-                type: "SET_IDENTITY_MODE",
-                playerId: myId,
-                mode,
-              })
-            }
-            style={[
-              styles.ruleCard,
-              game.identityMode === mode && styles.ruleCardSelected,
-            ]}
-          >
-            <Text style={styles.ruleTitle}>{label}</Text>
-            <Text style={styles.ruleText}>
-              {mode === "reveal"
-                ? "Les identités sont visibles pendant les tours."
-                : mode === "hidden"
-                  ? "Les identités restent cachées pendant le tour."
-                  : "Après chaque tour, le Maître de jeu décide pour le suivant."}
+        {game.gameMode === "intense" && (
+          <>
+            <Text style={styles.sectionTitle}>{t.identities}</Text>
+            <Text style={styles.helper}>
+              Seul le Maître de jeu décide. Il n'y a aucun vote.
             </Text>
-          </TouchableOpacity>
-        ))}
+
+            {(
+              [
+                ["reveal", t.revealed],
+                ["hidden", t.hidden],
+              ] as [IdentityMode, string][]
+            ).map(([mode, label]) => (
+              <TouchableOpacity
+                key={mode}
+                disabled={!isHost}
+                onPress={() =>
+                  dispatch({
+                    type: "SET_IDENTITY_MODE",
+                    playerId: myId,
+                    mode,
+                  })
+                }
+                style={[
+                  styles.ruleCard,
+                  game.identityMode === mode && styles.ruleCardSelected,
+                ]}
+              >
+                <Text style={styles.ruleTitle}>{label}</Text>
+                <Text style={styles.ruleText}>
+                  {mode === "reveal"
+                    ? "Les identités sont visibles pendant les tours."
+                    : "Les identités restent cachées pendant le tour."}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </>
+        )}
 
         <Text style={styles.sectionTitle}>{t.gameMode}</Text>
         <Text style={styles.helper}>Le Maître de jeu choisit le mode pour toute la partie.</Text>
@@ -2036,35 +2277,17 @@ export default function App() {
               <Text style={styles.helper}>👥 3 joueurs minimum</Text>
         </TouchableOpacity>
 
-        {game.identityMode === "choice" && isHost && (
-          <View style={styles.hostChoiceBox}>
-            <Text style={styles.hostChoiceTitle}>👑 Choix pour le premier tour</Text>
-            <Button
-              label={t.revealed}
-              onPress={() =>
-                dispatch({
-                  type: "SET_ROUND_IDENTITY",
-                  playerId: myId,
-                  mode: "reveal",
-                })
-              }
-              variant="yellow"
-            />
-            <Button
-              label={t.hidden}
-              onPress={() =>
-                dispatch({
-                  type: "SET_ROUND_IDENTITY",
-                  playerId: myId,
-                  mode: "hidden",
-                })
-              }
-              variant="outline"
-            />
-          </View>
+        {game.gameMode === "intense" && isHost && (
+          <TouchableOpacity
+            onPress={() => dispatch({ type: "SET_DEMASKING_ENABLED", playerId: myId, enabled: !game.demaskingEnabled })}
+            style={[styles.ruleCard, game.demaskingEnabled && styles.ruleCardSelected]}
+          >
+            <Text style={styles.ruleTitle}>{game.demaskingEnabled ? "🕵️ TENTATIVE DE DÉMASQUAGE : ACTIVÉE" : "🕵️ TENTATIVE DE DÉMASQUAGE : DÉSACTIVÉE"}</Text>
+            <Text style={styles.ruleText}>Après chaque tour Intense, tous les joueurs votent pour deviner qui a écrit la proposition choisie. La cible vote aussi.</Text>
+          </TouchableOpacity>
         )}
 
-        {game.identityMode !== "choice" && isHost && (
+        {isHost && (
           <Button
             label="Continuer → Ordre / Désordre"
             onPress={() =>
@@ -2080,79 +2303,6 @@ export default function App() {
         {!isHost && (
           <View style={styles.waitCard}>
             <Text style={styles.waitText}>{t.waiting}</Text>
-          </View>
-        )}
-      </ScrollView>
-    );
-  }
-
-  function renderIdentityChoice() {
-    if (!game) return null;
-    const isHost = game.hostId === myId;
-
-    return (
-      <ScrollView
-        contentContainerStyle={[
-          styles.scroll,
-          { backgroundColor: liveTheme.background },
-        ]}
-      >
-        <View style={[styles.modeThemeBanner, { backgroundColor: liveTheme.hero }]}>
-          <Text style={styles.modeThemeBannerTitle}>🎲 DÉCISION DU MAÎTRE DE JEU</Text>
-          <Text style={styles.modeThemeBannerText}>
-            Choisis si les identités seront visibles ou cachées pour le prochain tour.
-          </Text>
-        </View>
-
-        {isHost ? (
-          <>
-            <TouchableOpacity
-              onPress={() =>
-                dispatch({
-                  type: "SET_ROUND_IDENTITY",
-                  playerId: myId,
-                  mode: "reveal",
-                })
-              }
-              style={[
-                styles.ruleCard,
-                { borderColor: liveTheme.border, backgroundColor: liveTheme.surface },
-              ]}
-            >
-              <Text style={[styles.ruleTitle, { color: liveTheme.text }]}>
-                👁️ Identités révélées
-              </Text>
-              <Text style={[styles.ruleText, { color: liveTheme.muted }]}>
-                Les identités seront visibles pendant le prochain tour.
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              onPress={() =>
-                dispatch({
-                  type: "SET_ROUND_IDENTITY",
-                  playerId: myId,
-                  mode: "hidden",
-                })
-              }
-              style={[
-                styles.ruleCard,
-                { borderColor: liveTheme.border, backgroundColor: liveTheme.surface },
-              ]}
-            >
-              <Text style={[styles.ruleTitle, { color: liveTheme.text }]}>
-                🙈 Identités cachées
-              </Text>
-              <Text style={[styles.ruleText, { color: liveTheme.muted }]}>
-                Les identités resteront cachées pendant le prochain tour.
-              </Text>
-            </TouchableOpacity>
-          </>
-        ) : (
-          <View style={[styles.waitCard, { backgroundColor: liveTheme.surface }]}>
-            <Text style={[styles.waitText, { color: liveTheme.muted }]}>
-              👑 Le Maître de jeu choisit la visibilité des identités pour le prochain tour.
-            </Text>
           </View>
         )}
       </ScrollView>
@@ -2761,6 +2911,79 @@ export default function App() {
     );
   }
 
+  function renderDemaskingVote() {
+    if (!game) return null;
+    const authors: string[] = Array.from(new Set<string>(
+      game.proposals.filter((p) => p.authorId !== game.currentPlayerId).map((p) => p.authorId)
+    ));
+    const hasVoted = !!game.demaskingVotes[myId];
+    const currentPlayer = game.players.find((p) => p.id === game.currentPlayerId);
+
+    return (
+      <ScrollView contentContainerStyle={styles.intenseScroll}>
+        {renderIntenseHeader("🕵️ TENTATIVE DE DÉMASQUAGE", "Qui a écrit la proposition choisie ?", "VOTE SECRET")}
+        <View style={styles.intenseSpectator}>
+          <Text style={styles.intenseSpectatorIcon}>?</Text>
+          <Text style={styles.intenseSpectatorTitle}>À vous de deviner.</Text>
+          <Text style={styles.intenseSpectatorText}>Chaque joueur vote une fois. La cible vote aussi. Les auteurs restent cachés jusqu'à la fin du vote.</Text>
+        </View>
+        {authors.map((authorId) => {
+          const author = game.players.find((p) => p.id === authorId);
+          return (
+            <TouchableOpacity
+              key={authorId}
+              disabled={hasVoted}
+              onPress={() => dispatch({ type: "SUBMIT_DEMASKING_VOTE", playerId: myId, authorId })}
+              style={[styles.ruleCard, hasVoted && game.demaskingVotes[myId] === authorId && styles.ruleCardSelected, hasVoted && game.demaskingVotes[myId] !== authorId && styles.ruleCardDisabled]}
+            >
+              <Text style={styles.ruleTitle}>👤 {author?.name ?? "Joueur"}</Text>
+              <Text style={styles.ruleText}>Je pense que c'est lui / elle.</Text>
+            </TouchableOpacity>
+          );
+        })}
+        {hasVoted ? (
+          <View style={styles.waitCard}>
+            <Text style={styles.waitText}>Vote enregistré. En attente des autres joueurs…</Text>
+          </View>
+        ) : null}
+        <Text style={styles.helper}>Joueur en cours : {currentPlayer?.name ?? "Joueur"}</Text>
+      </ScrollView>
+    );
+  }
+
+  function renderDemaskingResult() {
+    if (!game) return null;
+    const winner = game.demaskingResult ? game.players.find((p) => p.id === game.demaskingResult) : null;
+    const actualAuthor = selectedProposal ? game.players.find((p) => p.id === selectedProposal.authorId) : null;
+    const isCurrentPlayer = game.currentPlayerId === myId;
+
+    return (
+      <ScrollView contentContainerStyle={styles.intenseScroll}>
+        {renderIntenseHeader("🕵️ DÉMASQUAGE", "Le vote est terminé.", "RÉSULTAT")}
+        <View style={styles.intenseRoundComplete}>
+          <Text style={styles.intenseRoundNumber}>{game.demaskingTie ? "🤝" : "🎯"}</Text>
+          <Text style={styles.intenseRoundCaption}>{game.demaskingTie ? "ÉGALITÉ" : "VOTE TERMINÉ"}</Text>
+        </View>
+        <View style={styles.intenseSpectator}>
+          <Text style={styles.intenseSpectatorTitle}>Auteur réel</Text>
+          <Text style={styles.intenseSpectatorText}>{actualAuthor?.name ?? "Joueur"}</Text>
+          {game.demaskingTie ? (
+            <Text style={styles.intenseSpectatorText}>Égalité : personne n'est démasqué par le vote.</Text>
+          ) : (
+            <Text style={styles.intenseSpectatorText}>Le vote majoritaire désigne : {winner?.name ?? "Joueur"}.</Text>
+          )}
+        </View>
+        {isCurrentPlayer ? (
+          <TouchableOpacity activeOpacity={0.88} onPress={() => dispatch({ type: "CONTINUE_AFTER_DEMASKING", playerId: myId })} style={styles.intenseMainButton}>
+            <Text style={styles.intenseMainButtonText}>TOUR SUIVANT</Text><Text style={styles.intenseMainButtonArrow}>→</Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.waitCard}><Text style={styles.waitText}>Le joueur en cours lance le tour suivant…</Text></View>
+        )}
+      </ScrollView>
+    );
+  }
+
   function renderRoundEnd() {
     if (!game) return null;
 
@@ -2875,12 +3098,25 @@ export default function App() {
               <Text style={styles.helper}>👥 3 joueurs minimum</Text>
               </TouchableOpacity>
 
+              {game.gameMode === "intense" && (
+                <>
+                  <Text style={styles.sectionTitle}>🕵️ TENTATIVE DE DÉMASQUAGE</Text>
+                  <TouchableOpacity
+                    disabled={!isHost}
+                    onPress={() => dispatch({ type: "SET_DEMASKING_ENABLED", playerId: myId, enabled: !game.demaskingEnabled })}
+                    style={[styles.ruleCard, game.demaskingEnabled && styles.ruleCardSelected, !isHost && styles.ruleCardDisabled]}
+                  >
+                    <Text style={styles.ruleTitle}>{game.demaskingEnabled ? "🕵️ Activée" : "🕵️ Désactivée"}</Text>
+                    <Text style={styles.ruleText}>Après chaque tour, tous les joueurs votent pour deviner qui a écrit la proposition choisie. La cible vote aussi.</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+
               <Text style={styles.sectionTitle}>{t.identities}</Text>
               {(
                 [
                   ["reveal", t.revealed],
                   ["hidden", t.hidden],
-                  ["choice", t.choice],
                 ] as [IdentityMode, string][]
               ).map(([mode, label]) => (
                 <TouchableOpacity
@@ -2893,9 +3129,7 @@ export default function App() {
                   <Text style={styles.ruleText}>
                     {mode === "reveal"
                       ? "Les identités sont visibles pendant les tours."
-                      : mode === "hidden"
-                        ? "Les identités restent cachées pendant le tour."
-                        : "Le Maître de jeu peut décider au fil des tours."}
+                      : "Les identités restent cachées pendant le tour."}
                   </Text>
                 </TouchableOpacity>
               ))}
@@ -3062,14 +3296,16 @@ export default function App() {
         return renderSettings();
       case "orderChoice":
         return renderOrderChoice();
-      case "identityChoice":
-        return renderIdentityChoice();
       case "preparation":
         return renderPreparation();
       case "play":
         return renderPlay();
       case "reveal":
         return renderReveal();
+      case "demaskingVote":
+        return renderDemaskingVote();
+      case "demaskingResult":
+        return renderDemaskingResult();
       case "roundEnd":
         return renderRoundEnd();
       case "gameEnd":
