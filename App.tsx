@@ -3123,21 +3123,6 @@ export default function App() {
                 <Text style={styles.ruleText}>{t.disorderHelp}</Text>
               </TouchableOpacity>
 
-              {isHost && game.joinRequests.length > 0 && (
-                <View style={styles.requestsBox}>
-                  <Text style={styles.sectionTitle}>👑 {t.pendingJoin}</Text>
-                  {game.joinRequests.map((request) => (
-                    <View key={request.id} style={styles.requestRow}>
-                      <Text style={styles.playerName}>{request.avatar} {request.name}</Text>
-                      <View style={styles.requestButtons}>
-                        <Button label={t.accept} onPress={() => dispatch({ type: "APPROVE_JOIN", playerId: myId, requesterId: request.id })} variant="pink" />
-                        <Button label={t.reject} onPress={() => dispatch({ type: "REJECT_JOIN", playerId: myId, requesterId: request.id })} variant="outline" />
-                      </View>
-                    </View>
-                  ))}
-                </View>
-              )}
-
               {isHost && (
                 <View style={styles.playerManagement}>
                   <Text style={styles.sectionTitle}>👥 Joueurs</Text>
