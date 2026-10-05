@@ -1,0 +1,237 @@
+import "react-native-url-polyfill/auto";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Alert, AppState, Modal, Platform, SafeAreaView, ScrollView, Share,
+  StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View,
+} from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { createClient, RealtimeChannel } from "@supabase/supabase-js";
+
+/** AVOU — version multiplayer simplifiée et stable.
+ *  - Aucun compte.
+ *  - Un canal Realtime par partie.
+ *  - L'état complet est diffusé par le maître de jeu.
+ *  - Les demandes d'entrée sont rejouées jusqu'à réception.
+ *  - Le maître valide/refuse.
+ *  - Pas de boucle d'animation, pas de traduction réseau au démarrage,
+ *    pas de canal privé créé pour chaque joueur au lancement.
+ */
+
+const SUPABASE_URL = "https://iurrbuqvjaifmkaggpbw.supabase.co";
+const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? "";
+const supabase = SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+}) : null;
+
+const NICK_KEY = "avou_nickname_v2";
+const LANG_KEY = "avou_language_v2";
+
+type Lang = "fr"|"en"|"it"|"ar"|"zh"|"hi"|"bn"|"pt"|"ru"|"ur";
+type Mode = "target"|"intense";
+type OrderMode = "order"|"disorder";
+type Phase = "lobby"|"preparation"|"play"|"reveal"|"vote"|"result"|"end";
+type Player = { id:string; name:string; avatar:string };
+type Proposal = { id:string; type:"action"|"truth"; text:string; authorId:string };
+type Game = {
+  code:string; hostId:string; players:Player[]; requests:Player[];
+  mode:Mode; identity:"reveal"|"hidden"; order:OrderMode;
+  phase:Phase; round:number; currentPlayerId:string; targetPlayerId:string|null;
+  proposals:Proposal[]; submitted:string[]; selectedId:string|null; revealed:boolean;
+  demasking:boolean; votes:Record<string,string>; result:string|null;
+  version:number;
+};
+type Wire = { kind:"STATE"; state:Game } | { kind:"JOIN_REQUEST"; player:Player; requestId:string }
+  | { kind:"JOIN_RESULT"; accepted:boolean; player:Player; requestId:string }
+  | { kind:"PING"; requestId:string };
+
+const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
+const code4 = () => {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  return Array.from({length:4}, () => chars[Math.floor(Math.random()*chars.length)]).join("");
+};
+const avatars = ["🌸","🔥","⚡","🐯","🦊","🐼","🐸","🦄"];
+
+const TEXT:Record<Lang,Record<string,string>> = {
+  fr:{play:"JOUER SANS COMPTE",create:"CRÉER UNE PARTIE",join:"REJOINDRE",language:"LANGUE",name:"Pseudo",code:"Code de partie",back:"Retour",createNow:"Créer la partie",joinNow:"Rejoindre",waiting:"En attente du Maître de jeu…",requests:"Demandes d'entrée",accept:"Accepter",reject:"Refuser",settings:"⚙️ Réglages",rules:"📖 Règles du jeu",close:"Fermer",target:"🎯 MODE CIBLE",intense:"🔥 MODE INTENSE",order:"ORDRE",disorder:"DÉSORDRE",reveal:"Identités révélées",hidden:"Identités cachées",demask:"Tentative de démasquage",start:"Démarrer",chooseTarget:"Choisir une cible",writeAction:"Écris une Action",writeTruth:"Écris une Vérité",send:"Envoyer",choose:"Choisis une carte",revealCard:"Révéler",next:"Tour suivant",vote:"Qui a écrit la proposition ?",continue:"Continuer",leave:"Quitter",share:"Partager le code",players:"Joueurs",host:"Maître de jeu",badCode:"Partie introuvable ou réseau indisponible.",min2:"Il faut 2 joueurs pour le Mode Cible.",min3:"Il faut 3 joueurs pour le Mode Intense."},
+  en:{play:"PLAY WITHOUT ACCOUNT",create:"CREATE GAME",join:"JOIN",language:"LANGUAGE",name:"Nickname",code:"Game code",back:"Back",createNow:"Create game",joinNow:"Join",waiting:"Waiting for the Game Master…",requests:"Join requests",accept:"Accept",reject:"Reject",settings:"⚙️ Settings",rules:"📖 Game rules",close:"Close",target:"🎯 TARGET MODE",intense:"🔥 INTENSE MODE",order:"ORDER",disorder:"DISORDER",reveal:"Identities revealed",hidden:"Identities hidden",demask:"Reveal attempt",start:"Start",chooseTarget:"Choose a target",writeAction:"Write an Action",writeTruth:"Write a Truth",send:"Send",choose:"Choose a card",revealCard:"Reveal",next:"Next turn",vote:"Who wrote the proposal?",continue:"Continue",leave:"Leave",share:"Share code",players:"Players",host:"Game Master",badCode:"Game not found or network unavailable.",min2:"2 players are required for Target Mode.",min3:"3 players are required for Intense Mode."},
+  it:{play:"GIOCA SENZA ACCOUNT",create:"CREA PARTITA",join:"ENTRA",language:"LINGUA",name:"Nickname",code:"Codice partita",back:"Indietro",createNow:"Crea partita",joinNow:"Entra",waiting:"In attesa del Master…",requests:"Richieste",accept:"Accetta",reject:"Rifiuta",settings:"⚙️ Impostazioni",rules:"📖 Regole",close:"Chiudi",target:"🎯 MODALITÀ BERSAGLIO",intense:"🔥 MODALITÀ INTENSA",order:"ORDINE",disorder:"DISORDINE",reveal:"Identità rivelate",hidden:"Identità nascoste",demask:"Tentativo di smascheramento",start:"Avvia",chooseTarget:"Scegli un bersaglio",writeAction:"Scrivi un'azione",writeTruth:"Scrivi una verità",send:"Invia",choose:"Scegli una carta",revealCard:"Rivela",next:"Turno successivo",vote:"Chi ha scritto la proposta?",continue:"Continua",leave:"Esci",share:"Condividi codice",players:"Giocatori",host:"Master",badCode:"Partita non trovata o rete non disponibile.",min2:"Servono 2 giocatori.",min3:"Servono 3 giocatori."},
+  ar:{play:"اللعب بدون حساب",create:"إنشاء لعبة",join:"انضمام",language:"اللغة",name:"الاسم",code:"رمز اللعبة",back:"رجوع",createNow:"إنشاء",joinNow:"انضم",waiting:"في انتظار مدير اللعبة…",requests:"طلبات الانضمام",accept:"قبول",reject:"رفض",settings:"⚙️ الإعدادات",rules:"📖 قواعد اللعبة",close:"إغلاق",target:"🎯 الوضع المستهدف",intense:"🔥 الوضع المكثف",order:"ترتيب",disorder:"عشوائي",reveal:"الهويات ظاهرة",hidden:"الهويات مخفية",demask:"محاولة كشف الهوية",start:"ابدأ",chooseTarget:"اختر هدفاً",writeAction:"اكتب تحدياً",writeTruth:"اكتب حقيقة",send:"إرسال",choose:"اختر بطاقة",revealCard:"كشف",next:"الدور التالي",vote:"من كتب الاقتراح؟",continue:"متابعة",leave:"خروج",share:"مشاركة الرمز",players:"اللاعبون",host:"مدير اللعبة",badCode:"اللعبة غير موجودة أو الشبكة غير متاحة.",min2:"يلزم لاعبان.",min3:"يلزم 3 لاعبين."},
+  zh:{play:"无需账号开始",create:"创建游戏",join:"加入",language:"语言",name:"昵称",code:"游戏代码",back:"返回",createNow:"创建",joinNow:"加入",waiting:"等待游戏主持人…",requests:"加入请求",accept:"接受",reject:"拒绝",settings:"⚙️ 设置",rules:"📖 游戏规则",close:"关闭",target:"🎯 目标模式",intense:"🔥 强力模式",order:"顺序",disorder:"随机",reveal:"身份公开",hidden:"身份隐藏",demask:"揭示尝试",start:"开始",chooseTarget:"选择目标",writeAction:"写一个挑战",writeTruth:"写一个真心话",send:"发送",choose:"选择一张卡",revealCard:"揭示",next:"下一回合",vote:"谁写了这个提议？",continue:"继续",leave:"退出",share:"分享代码",players:"玩家",host:"主持人",badCode:"找不到游戏或网络不可用。",min2:"至少需要2名玩家。",min3:"至少需要3名玩家。"},
+  hi:{play:"बिना अकाउंट खेलें",create:"गेम बनाएं",join:"जुड़ें",language:"भाषा",name:"नाम",code:"गेम कोड",back:"वापस",createNow:"बनाएं",joinNow:"जुड़ें",waiting:"गेम मास्टर की प्रतीक्षा…",requests:"जॉइन अनुरोध",accept:"स्वीकार",reject:"अस्वीकार",settings:"⚙️ सेटिंग्स",rules:"📖 खेल के नियम",close:"बंद",target:"🎯 टारगेट मोड",intense:"🔥 इंटेंस मोड",order:"क्रम",disorder:"यादृच्छिक",reveal:"पहचान दिखे",hidden:"पहचान छिपी",demask:"पहचान अनुमान",start:"शुरू",chooseTarget:"टारगेट चुनें",writeAction:"एक एक्शन लिखें",writeTruth:"एक सच लिखें",send:"भेजें",choose:"कार्ड चुनें",revealCard:"खोलें",next:"अगली बारी",vote:"प्रस्ताव किसने लिखा?",continue:"जारी रखें",leave:"छोड़ें",share:"कोड साझा करें",players:"खिलाड़ी",host:"गेम मास्टर",badCode:"गेम नहीं मिला या नेटवर्क उपलब्ध नहीं।",min2:"कम से कम 2 खिलाड़ी।",min3:"कम से कम 3 खिलाड़ी।"},
+  bn:{play:"অ্যাকাউন্ট ছাড়া খেলুন",create:"গেম তৈরি",join:"যোগ দিন",language:"ভাষা",name:"নাম",code:"গেম কোড",back:"ফিরে যান",createNow:"তৈরি",joinNow:"যোগ দিন",waiting:"গেম মাস্টারের অপেক্ষা…",requests:"যোগদানের অনুরোধ",accept:"গ্রহণ",reject:"প্রত্যাখ্যান",settings:"⚙️ সেটিংস",rules:"📖 গেমের নিয়ম",close:"বন্ধ",target:"🎯 টার্গেট মোড",intense:"🔥 ইনটেন্স মোড",order:"ক্রম",disorder:"এলোমেলো",reveal:"পরিচয় প্রকাশ",hidden:"পরিচয় গোপন",demask:"পরিচয় অনুমান",start:"শুরু",chooseTarget:"টার্গেট বেছে নিন",writeAction:"একটি অ্যাকশন লিখুন",writeTruth:"একটি সত্য লিখুন",send:"পাঠান",choose:"একটি কার্ড বেছে নিন",revealCard:"খুলুন",next:"পরের টার্ন",vote:"প্রস্তাবটি কে লিখেছে?",continue:"চালিয়ে যান",leave:"বের হন",share:"কোড শেয়ার",players:"খেলোয়াড়",host:"গেম মাস্টার",badCode:"গেম পাওয়া যায়নি বা নেটওয়ার্ক নেই।",min2:"২ জন খেলোয়াড় দরকার।",min3:"৩ জন খেলোয়াড় দরকার।"},
+  pt:{play:"JOGAR SEM CONTA",create:"CRIAR PARTIDA",join:"ENTRAR",language:"IDIOMA",name:"Apelido",code:"Código",back:"Voltar",createNow:"Criar",joinNow:"Entrar",waiting:"Aguardando o Mestre…",requests:"Pedidos",accept:"Aceitar",reject:"Recusar",settings:"⚙️ Configurações",rules:"📖 Regras",close:"Fechar",target:"🎯 MODO ALVO",intense:"🔥 MODO INTENSO",order:"ORDEM",disorder:"DESORDEM",reveal:"Identidades reveladas",hidden:"Identidades ocultas",demask:"Tentativa de revelação",start:"Iniciar",chooseTarget:"Escolha um alvo",writeAction:"Escreva um desafio",writeTruth:"Escreva uma verdade",send:"Enviar",choose:"Escolha uma carta",revealCard:"Revelar",next:"Próximo turno",vote:"Quem escreveu a proposta?",continue:"Continuar",leave:"Sair",share:"Compartilhar código",players:"Jogadores",host:"Mestre",badCode:"Partida não encontrada ou rede indisponível.",min2:"São necessários 2 jogadores.",min3:"São necessários 3 jogadores."},
+  ru:{play:"ИГРАТЬ БЕЗ АККАУНТА",create:"СОЗДАТЬ ИГРУ",join:"ВОЙТИ",language:"ЯЗЫК",name:"Имя",code:"Код игры",back:"Назад",createNow:"Создать",joinNow:"Войти",waiting:"Ожидание ведущего…",requests:"Запросы",accept:"Принять",reject:"Отклонить",settings:"⚙️ Настройки",rules:"📖 Правила",close:"Закрыть",target:"🎯 ЦЕЛЕВОЙ РЕЖИМ",intense:"🔥 ИНТЕНСИВНЫЙ",order:"ПОРЯДОК",disorder:"ХАОС",reveal:"Личности раскрыты",hidden:"Личности скрыты",demask:"Попытка раскрытия",start:"Начать",chooseTarget:"Выберите цель",writeAction:"Напишите действие",writeTruth:"Напишите правду",send:"Отправить",choose:"Выберите карту",revealCard:"Открыть",next:"Следующий ход",vote:"Кто написал предложение?",continue:"Продолжить",leave:"Выйти",share:"Поделиться кодом",players:"Игроки",host:"Ведущий",badCode:"Игра не найдена или сеть недоступна.",min2:"Нужно 2 игрока.",min3:"Нужно 3 игрока."},
+  ur:{play:"بغیر اکاؤنٹ کھیلیں",create:"گیم بنائیں",join:"شامل ہوں",language:"زبان",name:"نام",code:"گیم کوڈ",back:"واپس",createNow:"بنائیں",joinNow:"شامل ہوں",waiting:"گیم ماسٹر کا انتظار…",requests:"درخواستیں",accept:"قبول",reject:"مسترد",settings:"⚙️ ترتیبات",rules:"📖 گیم کے قواعد",close:"بند",target:"🎯 ٹارگٹ موڈ",intense:"🔥 انٹنس موڈ",order:"ترتیب",disorder:"بے ترتیب",reveal:"شناخت ظاہر",hidden:"شناخت مخفی",demask:"شناخت کا اندازہ",start:"شروع",chooseTarget:"ہدف منتخب کریں",writeAction:"ایک ایکشن لکھیں",writeTruth:"ایک سچ لکھیں",send:"بھیجیں",choose:"کارڈ منتخب کریں",revealCard:"کھولیں",next:"اگلی باری",vote:"یہ تجویز کس نے لکھی؟",continue:"جاری رکھیں",leave:"چھوڑیں",share:"کوڈ شیئر کریں",players:"کھلاڑی",host:"گیم ماسٹر",badCode:"گیم نہیں ملی یا نیٹ ورک دستیاب نہیں۔",min2:"2 کھلاڑی ضروری ہیں۔",min3:"3 کھلاڑی ضروری ہیں۔"}
+};
+
+const languages:[Lang,string][] = [["fr","Français 🇫🇷"],["en","English 🇬🇧"],["it","Italiano 🇮🇹"],["ar","العربية 🇸🇦"],["zh","中文 🇨🇳"],["hi","हिन्दी 🇮🇳"],["bn","বাংলা 🇧🇩"],["pt","Português 🇵🇹"],["ru","Русский 🇷🇺"],["ur","اردو 🇵🇰"]];
+
+function makeGame(code:string, host:Player):Game {
+  return {code,hostId:host.id,players:[host],requests:[],mode:"target",identity:"reveal",order:"order",phase:"lobby",round:1,currentPlayerId:host.id,targetPlayerId:null,proposals:[],submitted:[],selectedId:null,revealed:false,demasking:false,votes:{},result:null,version:1};
+}
+function nextId(g:Game):string {
+  if (g.order === "disorder") {
+    const others=g.players.filter(p=>p.id!==g.currentPlayerId);
+    return (others[Math.floor(Math.random()*others.length)] ?? g.players[0])?.id ?? "";
+  }
+  const i=g.players.findIndex(p=>p.id===g.currentPlayerId);
+  return g.players[(i+1)%g.players.length]?.id ?? g.players[0]?.id ?? "";
+}
+function sameState(a:Game,b:Game){return JSON.stringify(a)===JSON.stringify(b)}
+
+export default function App(){
+  const [lang,setLang]=useState<Lang>("fr");
+  const t=TEXT[lang];
+  const [screen,setScreen]=useState<"home"|"create"|"join"|"game">("home");
+  const [name,setName]=useState("");
+  const [avatar,setAvatar]=useState(avatars[0]);
+  const [code,setCode]=useState("");
+  const [game,setGame]=useState<Game|null>(null);
+  const gameRef=useRef<Game|null>(null); gameRef.current=game;
+  const channel=useRef<RealtimeChannel|null>(null);
+  const idRef=useRef(uid());
+  const requestTimers=useRef<ReturnType<typeof setInterval>|null>(null);
+  const [error,setError]=useState("");
+  const [rules,setRules]=useState(false);
+  const [settings,setSettings]=useState(false);
+  const [action,setAction]=useState(""); const [truth,setTruth]=useState("");
+  const [target,setTarget]=useState(""); const [targetType,setTargetType]=useState<"action"|"truth">("truth"); const [targetText,setTargetText]=useState("");
+  const [pendingRequest,setPendingRequest]=useState(false); const [requestId,setRequestId]=useState("");
+
+  useEffect(()=>{(async()=>{try{const n=await AsyncStorage.getItem(NICK_KEY);const l=await AsyncStorage.getItem(LANG_KEY);if(n)setName(n);if(l && languages.some(x=>x[0]===l))setLang(l as Lang);}catch{}})()},[]);
+  useEffect(()=>{AsyncStorage.setItem(NICK_KEY,name.trim()).catch(()=>{})},[name]);
+  useEffect(()=>{AsyncStorage.setItem(LANG_KEY,lang).catch(()=>{})},[lang]);
+
+  const closeChannel=useCallback(()=>{if(channel.current){supabase?.removeChannel(channel.current);channel.current=null}},[]);
+  useEffect(()=>()=>{closeChannel();if(requestTimers.current)clearInterval(requestTimers.current)},[closeChannel]);
+
+  const applyState=useCallback((incoming:Game)=>{
+    setGame(prev=>sameState(prev??incoming,incoming)?prev:incoming);
+    gameRef.current=incoming;
+    setScreen("game");
+  },[]);
+
+  const send=useCallback(async(w:Wire)=>{
+    if(!channel.current) return;
+    try{await channel.current.send({type:"broadcast",event:"avou",payload:w})}catch(e){console.log("AVOU broadcast",e)}
+  },[]);
+
+  const publishState=useCallback(async(g:Game)=>{
+    const out={...g,version:g.version+1};
+    gameRef.current=out; setGame(out); await send({kind:"STATE",state:out});
+  },[send]);
+
+  const connect=useCallback(async(gameCode:string,onReady?:()=>void)=>{
+    if(!supabase){setError("Clé Supabase manquante. Ajoute EXPO_PUBLIC_SUPABASE_ANON_KEY dans .env puis relance Expo.");return null}
+    closeChannel();
+    const ch=supabase.channel(`avou:${gameCode}`,{config:{broadcast:{self:false}}});
+    ch.on("broadcast",{event:"avou"},({payload}:{payload:Wire})=>{
+      const w=payload;
+      if(w.kind==="STATE"){
+        const local=gameRef.current;
+        if(!local || w.state.version>=local.version) applyState(w.state);
+      } else if(w.kind==="JOIN_REQUEST"){
+        const local=gameRef.current;
+        if(local && local.hostId===idRef.current && !local.players.some(p=>p.id===w.player.id)){
+          const next={...local,requests:local.requests.some(p=>p.id===w.player.id)?local.requests:[...local.requests,w.player],version:local.version+1};
+          gameRef.current=next;setGame(next);send({kind:"STATE",state:next});
+        }
+      } else if(w.kind==="JOIN_RESULT" && w.player.id===idRef.current && w.requestId===requestId){
+        if(requestTimers.current)clearInterval(requestTimers.current);
+        setPendingRequest(false);
+        if(w.accepted){
+          const local=gameRef.current;
+          if(local) applyState({...local,players:local.players.some(p=>p.id===w.player.id)?local.players:[...local.players,w.player]});
+          send({kind:"PING",requestId:uid()});
+        } else Alert.alert("AVOU", "Le Maître de jeu a refusé l'entrée.");
+      }
+    });
+    ch.subscribe(s=>{if(s==="SUBSCRIBED")onReady?.()});
+    channel.current=ch; return ch;
+  },[applyState,closeChannel,requestId,send]);
+
+  const createGame=async()=>{
+    setError(""); const n=name.trim(); if(!n){setError("Entre ton pseudo.");return}
+    if(!supabase){setError("Clé Supabase manquante. Vérifie EXPO_PUBLIC_SUPABASE_ANON_KEY.");return}
+    const me={id:idRef.current,name:n,avatar}; const g=makeGame(code4(),me);
+    await connect(g.code); gameRef.current=g;setGame(g);setScreen("game"); await send({kind:"STATE",state:g});
+  };
+
+  const joinGame=async()=>{
+    setError(""); const n=name.trim(); const c=code.trim().toUpperCase(); if(!n){setError("Entre ton pseudo.");return} if(c.length!==4){setError("Le code doit contenir 4 caractères.");return}
+    if(!supabase){setError("Clé Supabase manquante. Vérifie EXPO_PUBLIC_SUPABASE_ANON_KEY.");return}
+    const me={id:idRef.current,name:n,avatar}; const rid=uid(); setRequestId(rid); setPendingRequest(true);
+    const ch=await connect(c); if(!ch){setPendingRequest(false);return}
+    const ask=()=>send({kind:"JOIN_REQUEST",player:me,requestId:rid});
+    ask(); if(requestTimers.current)clearInterval(requestTimers.current); requestTimers.current=setInterval(ask,1800);
+    setCode(c);setScreen("game");
+    setTimeout(()=>{if(pendingRequest){}},9000);
+  };
+
+  const hostAction=async(mutator:(g:Game)=>Game)=>{const g=gameRef.current;if(!g||g.hostId!==idRef.current)return;await publishState(mutator({...g}));};
+
+  const approve=async(p:Player,ok:boolean)=>{const g=gameRef.current;if(!g||g.hostId!==idRef.current)return;const next=ok?{...g,players:g.players.some(x=>x.id===p.id)?g.players:[...g.players,p],requests:g.requests.filter(x=>x.id!==p.id),version:g.version+1}:{...g,requests:g.requests.filter(x=>x.id!==p.id),version:g.version+1};gameRef.current=next;setGame(next);await send({kind:"JOIN_RESULT",accepted:ok,player:p,requestId:uid()});await send({kind:"STATE",state:next})};
+
+  const start=async()=>{const g=gameRef.current;if(!g||g.hostId!==idRef.current)return;if(g.players.length<(g.mode==="intense"?3:2)){setError(g.mode==="intense"?t.min3:t.min2);return} await publishState({...g,phase:"preparation",currentPlayerId:g.players[0].id,submitted:[],proposals:[],selectedId:null,targetPlayerId:null,result:null});};
+
+  const submitIntense=async()=>{const g=gameRef.current;if(!g||g.phase!=="preparation"||g.mode!=="intense"||g.currentPlayerId===idRef.current||!action.trim()||!truth.trim()||g.submitted.includes(idRef.current))return;const ps=[...g.proposals,{id:uid(),type:"action" as const,text:action.trim(),authorId:idRef.current},{id:uid(),type:"truth" as const,text:truth.trim(),authorId:idRef.current}];const sub=[...g.submitted,idRef.current];setAction("");setTruth("");await publishState({...g,proposals:ps,submitted:sub,phase:sub.length===g.players.filter(p=>p.id!==g.currentPlayerId).length?"play":"preparation"});};
+
+  const submitTarget=async()=>{const g=gameRef.current;if(!g||g.phase!=="preparation"||g.mode!=="target"||g.currentPlayerId!==idRef.current||!target||!targetText.trim())return;const p={id:uid(),type:targetType,text:targetText.trim(),authorId:idRef.current};await publishState({...g,proposals:[p],submitted:[idRef.current],targetPlayerId:target,phase:"play"});setTargetText("")};
+
+  const select=async(p:Proposal)=>{const g=gameRef.current;if(!g||g.phase!=="play")return;const targetId=g.mode==="target"?g.targetPlayerId:g.currentPlayerId;if(targetId!==idRef.current)return;await publishState({...g,selectedId:p.id,phase:"reveal",revealed:false})};
+  const reveal=async()=>{const g=gameRef.current;if(!g||g.phase!=="reveal"||g.selectedId==null)return;const p=g.proposals.find(x=>x.id===g.selectedId);if(!p)return;if(g.mode==="intense"&&g.demasking){await publishState({...g,revealed:true,phase:"vote"})}else await publishState({...g,revealed:true})};
+  const vote=async(author:string)=>{const g=gameRef.current;if(!g||g.phase!=="vote"||g.votes[idRef.current])return;const votes={...g.votes,[idRef.current]:author};const eligible=g.proposals.map(p=>p.authorId);const done=g.players.every(p=>votes[p.id]);if(!done){await publishState({...g,votes});return}const counts=eligible.reduce((m,id)=>(m[id]=(m[id]||0)+Object.values(votes).filter(v=>v===id).length,m),{} as Record<string,number>);const max=Math.max(0,...Object.values(counts));const winners=Object.keys(counts).filter(id=>counts[id]===max);await publishState({...g,votes,result:winners.length===1?winners[0]:null,phase:"result"})};
+  const next=async()=>{const g=gameRef.current;if(!g||g.currentPlayerId!==idRef.current)return;const currentIndex=g.players.findIndex(p=>p.id===g.currentPlayerId);const nextPlayer=nextId(g);await publishState({...g,round:g.round+1,currentPlayerId:nextPlayer,phase:"preparation",proposals:[],submitted:[],selectedId:null,revealed:false,targetPlayerId:null,votes:{},result:null});};
+
+  const leave=async()=>{const g=gameRef.current;if(!g)return; if(g.phase!=="lobby"&&g.phase!=="end"&&g.currentPlayerId===idRef.current){Alert.alert("AVOU","Tu ne peux pas quitter pendant ton tour.");return}const remaining=g.players.filter(p=>p.id!==idRef.current);closeChannel();if(remaining.length===0){setGame(null);setScreen("home");return}const host=g.hostId===idRef.current?remaining[0].id:g.hostId;const nextG={...g,players:remaining,hostId:host,phase:remaining.length<2?"end":g.mode==="intense"&&remaining.length<3?"preparation":g.phase,mode:g.mode==="intense"&&remaining.length<3?"target":g.mode,currentPlayerId:remaining.some(p=>p.id===g.currentPlayerId)?g.currentPlayerId:remaining[0].id,version:g.version+1};gameRef.current=nextG;await connect(nextG.code);await send({kind:"STATE",state:nextG});setGame(null);setScreen("home")};
+
+  const share=async()=>{const g=gameRef.current;if(g)await Share.share({message:`AVOU — rejoins ma partie avec le code ${g.code}`})};
+
+  const me=game?.players.find(p=>p.id===idRef.current);
+  const isHost=!!game&&game.hostId===idRef.current;
+  const current=game?.players.find(p=>p.id===game.currentPlayerId);
+  const targetPlayer=game?.players.find(p=>p.id===game.targetPlayerId);
+  const selected=game?.proposals.find(p=>p.id===game.selectedId);
+  const isTarget=game?.mode==="target"&&game.targetPlayerId===idRef.current;
+  const isCurrent=game?.currentPlayerId===idRef.current;
+
+  const rulesText=`AVOU — RÈGLES DU JEU\n\n🎯 MODE CIBLE\nÀ partir de 2 joueurs. Le joueur actif choisit une cible et écrit une Action OU une Vérité. La cible voit uniquement le type, choisit, puis le contenu est révélé.\n\n🔥 MODE INTENSE\nÀ partir de 3 joueurs. Tous les joueurs sauf la cible écrivent une Action et une Vérité. La cible choisit une proposition sans voir son contenu. Les propositions sont supprimées après le tour.\n\n👁️ IDENTITÉS\nEn Mode Cible, elles sont révélées. En Mode Intense, le Maître de jeu choisit révélées ou cachées.\n\n🎲 ORDRE / DÉSORDRE\nOrdre = séquence fixe. Désordre = l'application choisit le prochain joueur aléatoirement.\n\n🎭 DÉMASQUAGE\nEn Intense, si activé par le Maître de jeu, tous les joueurs votent après la révélation pour deviner l'auteur. Le résultat est affiché avant le tour suivant.\n\n👑 MAÎTRE DE JEU\nLe créateur est Maître de jeu. Lui seul modifie les réglages. S'il quitte, le rôle passe au premier joueur restant.\n\n🚪 SORTIE\nUn joueur peut quitter hors de son tour. Si Intense passe sous 3 joueurs, la partie repasse automatiquement en Cible.`;
+
+  if(screen==="home") return <SafeAreaView style={s.safe}><StatusBar barStyle="dark-content"/><ScrollView contentContainerStyle={s.container}>
+    <Text style={s.logo}>AVOU</Text><Text style={s.subtitle}>GOOD VIBE • ACTION OU VÉRITÉ</Text>
+    <TextInput value={name} onChangeText={setName} placeholder={t.name} style={s.input}/>
+    <View style={s.avatarRow}>{avatars.map(a=><TouchableOpacity key={a} onPress={()=>setAvatar(a)} style={[s.avatar,avatar===a&&s.avatarOn]}><Text style={{fontSize:28}}>{a}</Text></TouchableOpacity>)}</View>
+    <TouchableOpacity style={s.btnPink} onPress={()=>setScreen("create")}><Text style={s.btnText}>{t.create}</Text></TouchableOpacity>
+    <TouchableOpacity style={s.btnPurple} onPress={()=>setScreen("join")}><Text style={s.btnText}>{t.join}</Text></TouchableOpacity>
+    <TouchableOpacity style={s.btnYellow} onPress={()=>{}}><Text style={s.btnDark}>{t.rules}</Text></TouchableOpacity>
+    <Text style={s.section}>{t.language}</Text>{languages.map(([c,label])=><TouchableOpacity key={c} onPress={()=>setLang(c)} style={[s.lang,c===lang&&s.langOn]}><Text style={s.langText}>{label}</Text></TouchableOpacity>)}
+    {error?<Text style={s.error}>{error}</Text>:null}
+  </ScrollView></SafeAreaView>;
+
+  if(screen==="create") return <SafeAreaView style={s.safe}><View style={s.container}><Text style={s.h1}>{t.create}</Text><Text style={s.muted}>Pseudo : {name||"—"}</Text><TouchableOpacity style={s.btnPink} onPress={createGame}><Text style={s.btnText}>{t.createNow}</Text></TouchableOpacity><TouchableOpacity onPress={()=>setScreen("home")}><Text style={s.back}>{t.back}</Text></TouchableOpacity>{error?<Text style={s.error}>{error}</Text>:null}</View></SafeAreaView>;
+  if(screen==="join"&&!pendingRequest) return <SafeAreaView style={s.safe}><View style={s.container}><Text style={s.h1}>{t.join}</Text><TextInput value={code} onChangeText={v=>setCode(v.toUpperCase())} maxLength={4} autoCapitalize="characters" placeholder={t.code} style={s.codeInput}/><TouchableOpacity style={s.btnPurple} onPress={joinGame}><Text style={s.btnText}>{t.joinNow}</Text></TouchableOpacity><TouchableOpacity onPress={()=>setScreen("home")}><Text style={s.back}>{t.back}</Text></TouchableOpacity>{error?<Text style={s.error}>{error}</Text>:null}</View></SafeAreaView>;
+
+  if(!game) return <SafeAreaView style={s.safe}><View style={s.container}><Text style={s.h1}>{t.waiting}</Text><Text style={s.codeBig}>{code}</Text><Text style={s.muted}>{pendingRequest?"Demande envoyée au Maître de jeu. Cette fenêtre reste ouverte pendant la connexion.":t.badCode}</Text><TouchableOpacity onPress={()=>{setPendingRequest(false);setScreen("home");closeChannel()}}><Text style={s.back}>{t.back}</Text></TouchableOpacity></View></SafeAreaView>;
+
+  return <SafeAreaView style={s.safe}><ScrollView contentContainerStyle={s.container}>
+    <View style={s.top}><View><Text style={s.logoSmall}>AVOU</Text><Text style={s.codeLabel}>{game.code}</Text></View><View style={s.topBtns}><TouchableOpacity onPress={share}><Text style={s.icon}>↗</Text></TouchableOpacity><TouchableOpacity onPress={()=>setSettings(true)}><Text style={s.icon}>⚙️</Text></TouchableOpacity></View></View>
+    <Text style={s.h2}>{current?.name} • Tour {game.round}</Text>
+    <View style={s.players}>{game.players.map(p=><View key={p.id} style={s.player}><Text style={{fontSize:24}}>{p.avatar}</Text><Text style={s.playerName}>{p.name}{p.id===game.hostId?" 👑":""}</Text></View>)}</View>
+    {isHost&&game.requests.length>0?<View style={s.panel}><Text style={s.h2}>{t.requests}</Text>{game.requests.map(p=><View key={p.id} style={s.request}><Text>{p.avatar} {p.name}</Text><View style={s.row}><TouchableOpacity style={s.smallGreen} onPress={()=>approve(p,true)}><Text>{t.accept}</Text></TouchableOpacity><TouchableOpacity style={s.smallRed} onPress={()=>approve(p,false)}><Text>{t.reject}</Text></TouchableOpacity></View></View>)}</View>:null}
+    {game.phase==="lobby"?<View style={s.panel}><Text style={s.h1}>{isHost?t.host:t.waiting}</Text><Text style={s.muted}>{t.players}: {game.players.length}</Text>{isHost&&<><TouchableOpacity style={s.mode} onPress={()=>hostAction(g=>({...g,mode:"target",identity:"reveal",demasking:false}))}><Text>{t.target}</Text></TouchableOpacity><TouchableOpacity style={s.mode} disabled={game.players.length<3} onPress={()=>hostAction(g=>({...g,mode:"intense"}))}><Text>{t.intense}</Text></TouchableOpacity><TouchableOpacity style={s.btnPink} onPress={start}><Text style={s.btnText}>{t.start}</Text></TouchableOpacity></>}</View>:null}
+    {game.phase==="preparation"&&game.mode==="target"&&isCurrent?<View style={s.panel}><Text style={s.h2}>{t.chooseTarget}</Text>{game.players.filter(p=>p.id!==idRef.current).map(p=><TouchableOpacity key={p.id} onPress={()=>setTarget(p.id)} style={[s.targetBtn,target===p.id&&s.selected]}><Text>{p.avatar} {p.name}</Text></TouchableOpacity>)}<View style={s.row}><TouchableOpacity onPress={()=>setTargetType("action")} style={[s.typeBtn,targetType==="action"&&s.selected]}><Text>🔥 ACTION</Text></TouchableOpacity><TouchableOpacity onPress={()=>setTargetType("truth")} style={[s.typeBtn,targetType==="truth"&&s.selected]}><Text>💬 VÉRITÉ</Text></TouchableOpacity></View><TextInput value={targetText} onChangeText={setTargetText} placeholder="Ta proposition" style={s.input}/><TouchableOpacity style={s.btnPink} onPress={submitTarget}><Text style={s.btnText}>{t.send}</Text></TouchableOpacity></View>:null}
+    {game.phase==="preparation"&&game.mode==="intense"&&!isCurrent?<View style={s.panel}><Text style={s.h2}>{t.writeAction}</Text><TextInput value={action} onChangeText={setAction} style={s.input}/><Text style={s.h2}>{t.writeTruth}</Text><TextInput value={truth} onChangeText={setTruth} style={s.input}/><TouchableOpacity style={s.btnPink} onPress={submitIntense}><Text style={s.btnText}>{t.send}</Text></TouchableOpacity></View>:null}
+    {game.phase==="preparation"&&((game.mode==="intense"&&isCurrent)||game.mode==="target"&&!isCurrent)?<Text style={s.muted}>{t.waiting}</Text>:null}
+    {game.phase==="play"&&isTarget?<View style={s.panel}><Text style={s.h1}>{t.choose}</Text>{game.proposals.map((p,i)=><TouchableOpacity key={p.id} onPress={()=>select(p)} style={s.card}><Text style={s.cardNum}>{i+1}</Text><Text style={s.cardType}>{p.type==="action"?"🔥 ACTION":"💬 VÉRITÉ"}</Text><Text style={s.muted}>CONTENU CACHÉ</Text></TouchableOpacity>)}</View>:null}
+    {game.phase==="reveal"&&selected?<View style={s.panel}><Text style={s.h1}>{selected.type==="action"?"🔥 ACTION":"💬 VÉRITÉ"}</Text>{game.revealed?<><Text style={s.revealText}>{selected.text}</Text>{game.mode==="intense"&&game.demasking&&isTarget?null:<TouchableOpacity style={s.btnPurple} onPress={next}><Text style={s.btnText}>{t.next}</Text></TouchableOpacity>}</>:isTarget?<TouchableOpacity style={s.btnPink} onPress={reveal}><Text style={s.btnText}>{t.revealCard}</Text></TouchableOpacity>:<Text style={s.muted}>{t.waiting}</Text>}</View>:null}
+    {game.phase==="vote"&&<View style={s.panel}><Text style={s.h2}>{t.vote}</Text>{game.proposals.map(p=><TouchableOpacity key={p.id} onPress={()=>vote(p.authorId)} style={s.targetBtn}><Text>{game.players.find(x=>x.id===p.authorId)?.name??"?"}</Text></TouchableOpacity>)}</View>}
+    {game.phase==="result"?<View style={s.panel}><Text style={s.h1}>🎭 {game.result?game.players.find(p=>p.id===game.result)?.name:"Égalité / impossible à démasquer"}</Text><TouchableOpacity style={s.btnPurple} onPress={next}><Text style={s.btnText}>{t.continue}</Text></TouchableOpacity></View>:null}
+    <TouchableOpacity onPress={leave} style={s.leave}><Text>{t.leave}</Text></TouchableOpacity>
+    <Modal visible={settings} transparent animationType="slide" onRequestClose={()=>setSettings(false)}><View style={s.modalShade}><View style={s.modal}><Text style={s.h1}>{t.settings}</Text>{isHost&&<><TouchableOpacity style={s.mode} onPress={()=>hostAction(g=>({...g,mode:"target",identity:"reveal",demasking:false}))}><Text>{t.target}</Text></TouchableOpacity><TouchableOpacity style={s.mode} disabled={game.players.length<3} onPress={()=>hostAction(g=>({...g,mode:"intense"}))}><Text>{t.intense}</Text></TouchableOpacity><TouchableOpacity style={s.mode} onPress={()=>hostAction(g=>({...g,order:"order"}))}><Text>{t.order}</Text></TouchableOpacity><TouchableOpacity style={s.mode} onPress={()=>hostAction(g=>({...g,order:"disorder"}))}><Text>{t.disorder}</Text></TouchableOpacity>{game.mode==="intense"&&<TouchableOpacity style={s.mode} onPress={()=>hostAction(g=>({...g,identity:g.identity==="reveal"?"hidden":"reveal",demasking:g.demasking}))}><Text>{game.identity==="reveal"?t.reveal:t.hidden}</Text></TouchableOpacity>} {game.mode==="intense"&&<TouchableOpacity style={s.mode} onPress={()=>hostAction(g=>({...g,demasking:!g.demasking}))}><Text>{t.demask}: {game.demasking?"ON":"OFF"}</Text></TouchableOpacity>}</>}<TouchableOpacity style={s.mode} onPress={()=>{setSettings(false);setRules(true)}}><Text>{t.rules}</Text></TouchableOpacity><TouchableOpacity style={s.btnPurple} onPress={()=>setSettings(false)}><Text style={s.btnText}>{t.close}</Text></TouchableOpacity></View></View></Modal>
+    <Modal visible={rules} transparent animationType="fade" onRequestClose={()=>setRules(false)}><View style={s.modalShade}><View style={s.modal}><ScrollView><Text style={s.rules}>{rulesText}</Text></ScrollView><TouchableOpacity style={s.btnPurple} onPress={()=>setRules(false)}><Text style={s.btnText}>{t.close}</Text></TouchableOpacity></View></View></Modal>
+  </ScrollView></SafeAreaView>;
+}
+
+const s=StyleSheet.create({
+  safe:{flex:1,backgroundColor:"#FFF8FD"},container:{padding:20,paddingBottom:50,gap:12},logo:{fontSize:58,fontWeight:"900",color:"#7C3AED",textAlign:"center",marginTop:30},logoSmall:{fontSize:28,fontWeight:"900",color:"#7C3AED"},subtitle:{textAlign:"center",fontWeight:"800",color:"#EC4899",marginBottom:12},h1:{fontSize:26,fontWeight:"900",color:"#291A44",marginBottom:8},h2:{fontSize:19,fontWeight:"900",color:"#291A44"},muted:{color:"#766A83",lineHeight:21},input:{backgroundColor:"white",borderWidth:1,borderColor:"#E7DDF0",borderRadius:16,padding:14,fontSize:16},codeInput:{backgroundColor:"white",borderWidth:2,borderColor:"#7C3AED",borderRadius:18,padding:18,fontSize:28,textAlign:"center",fontWeight:"900",letterSpacing:8},codeBig:{fontSize:54,fontWeight:"900",color:"#7C3AED",textAlign:"center",letterSpacing:8},btnPink:{backgroundColor:"#EC4899",padding:16,borderRadius:18,alignItems:"center",marginTop:4},btnPurple:{backgroundColor:"#7C3AED",padding:16,borderRadius:18,alignItems:"center",marginTop:4},btnYellow:{backgroundColor:"#FACC15",padding:16,borderRadius:18,alignItems:"center",marginTop:4},btnText:{color:"white",fontWeight:"900",fontSize:16},btnDark:{color:"#291A44",fontWeight:"900",fontSize:16},back:{color:"#7C3AED",fontWeight:"800",textAlign:"center",padding:14},section:{fontWeight:"900",fontSize:17,color:"#291A44",marginTop:8},lang:{padding:13,borderRadius:14,backgroundColor:"white",borderWidth:1,borderColor:"#EEE5F4"},langOn:{borderColor:"#7C3AED",backgroundColor:"#F3E8FF"},langText:{fontWeight:"700"},avatarRow:{flexDirection:"row",flexWrap:"wrap",gap:8,justifyContent:"center"},avatar:{width:52,height:52,borderRadius:26,backgroundColor:"white",alignItems:"center",justifyContent:"center",borderWidth:1,borderColor:"#EEE5F4"},avatarOn:{borderColor:"#EC4899",borderWidth:3},error:{color:"#DC2626",fontWeight:"800",textAlign:"center",marginTop:10},top:{flexDirection:"row",justifyContent:"space-between",alignItems:"center"},topBtns:{flexDirection:"row",gap:14},icon:{fontSize:24},codeLabel:{fontWeight:"900",color:"#EC4899",letterSpacing:3},players:{flexDirection:"row",flexWrap:"wrap",gap:8},player:{backgroundColor:"white",borderRadius:16,padding:10,flexDirection:"row",alignItems:"center",gap:6,borderWidth:1,borderColor:"#EEE5F4"},playerName:{fontWeight:"800"},panel:{backgroundColor:"white",borderRadius:22,padding:16,borderWidth:1,borderColor:"#EEE5F4",gap:10,marginTop:8},request:{padding:10,borderRadius:14,backgroundColor:"#FFF7ED",flexDirection:"row",justifyContent:"space-between",alignItems:"center"},row:{flexDirection:"row",gap:8},smallGreen:{backgroundColor:"#DCFCE7",padding:9,borderRadius:10},smallRed:{backgroundColor:"#FEE2E2",padding:9,borderRadius:10},mode:{padding:14,borderRadius:14,backgroundColor:"#F3E8FF",borderWidth:1,borderColor:"#E9D5FF"},targetBtn:{padding:13,borderRadius:14,backgroundColor:"#FFF1F2",borderWidth:1,borderColor:"#FBCFE8"},typeBtn:{flex:1,padding:13,borderRadius:14,backgroundColor:"#F9FAFB",alignItems:"center"},selected:{borderWidth:2,borderColor:"#7C3AED",backgroundColor:"#F3E8FF"},card:{minHeight:130,borderRadius:22,backgroundColor:"#F3E8FF",alignItems:"center",justifyContent:"center",gap:8,borderWidth:2,borderColor:"#C4B5FD"},cardNum:{fontSize:22,fontWeight:"900"},cardType:{fontSize:20,fontWeight:"900",color:"#7C3AED"},revealText:{fontSize:24,fontWeight:"800",padding:15,backgroundColor:"#FFF7ED",borderRadius:18},leave:{padding:16,alignItems:"center"},modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.45)",justifyContent:"flex-end"},modal:{backgroundColor:"#FFF8FD",borderTopLeftRadius:28,borderTopRightRadius:28,padding:20,maxHeight:"85%"},rules:{fontSize:16,lineHeight:25,color:"#291A44",paddingBottom:16}
+});
