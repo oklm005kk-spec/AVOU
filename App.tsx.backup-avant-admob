@@ -1,11 +1,6 @@
 import "react-native-url-polyfill/auto";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AdEventType,
-  InterstitialAd,
-  TestIds,
-} from "react-native-google-mobile-ads";
-import {
   Alert,
   AppState,
   Animated,
@@ -972,61 +967,6 @@ export default function App() {
   const [error, setError] = useState("");
 
   const [game, setGame] = useState<GameState | null>(null);
-  const gameEndAdCountRef = useRef(0);
-  const previousGamePhaseRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    const currentPhase = game?.phase ?? null;
-
-    if (
-      currentPhase === "gameEnd" &&
-      previousGamePhaseRef.current !== "gameEnd"
-    ) {
-      gameEndAdCountRef.current += 1;
-
-      // Une publicité toutes les 2 fins de partie.
-      if (gameEndAdCountRef.current % 2 === 0) {
-        const adUnitId = __DEV__
-          ? TestIds.INTERSTITIAL
-          : "ca-app-pub-2733184679900055/8754144837";
-
-        const interstitial = InterstitialAd.createForAdRequest(adUnitId);
-
-        const unsubscribeLoaded = interstitial.addAdEventListener(
-          AdEventType.LOADED,
-          () => {
-            interstitial.show();
-          }
-        );
-
-        const unsubscribeClosed = interstitial.addAdEventListener(
-          AdEventType.CLOSED,
-          () => {
-            interstitial.load();
-          }
-        );
-
-        const unsubscribeError = interstitial.addAdEventListener(
-          AdEventType.ERROR,
-          (error) => {
-            console.log("❌ Erreur publicité interstitielle :", error);
-          }
-        );
-
-        interstitial.load();
-
-        return () => {
-          unsubscribeLoaded();
-          unsubscribeClosed();
-          unsubscribeError();
-        };
-      }
-    }
-
-    previousGamePhaseRef.current = currentPhase;
-  }, [game?.phase]);
-
-
   const gameRef = useRef<GameState | null>(null);
   CURRENT_PLAYER_NAMES = new Set(gameRef.current?.players.map((p) => p.name.trim()).filter(Boolean) ?? []);
   const channelRef = useRef<RealtimeChannel | null>(null);

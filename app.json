@@ -6,10 +6,12 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.avou.app"
     },
+
     "android": {
       "package": "com.avou.app",
       "adaptiveIcon": {
@@ -20,16 +22,25 @@
       },
       "predictiveBackGestureEnabled": false
     },
+
     "web": {
       "favicon": "./assets/favicon.png"
     },
+
     "extra": {
       "eas": {
         "projectId": "22fd4728-7bda-4472-966d-ae33880a1151"
       }
     },
+
     "plugins": [
-      "expo-asset"
+      "expo-asset",
+      [
+        "react-native-google-mobile-ads",
+        {
+          "androidAppId": "ca-app-pub-2733184679900055~7109890678"
+        }
+      ]
     ]
   }
 }
