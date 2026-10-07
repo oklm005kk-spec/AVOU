@@ -600,7 +600,7 @@ function reducer(state: GameState, action: Action): GameState {
 
       return {
         ...state,
-        phase: "preparation",
+        phase: "roundEnd",
         turnIndex: nextIndex,
         currentPlayerId: nextId,
         targetPlayerId: null,
@@ -668,7 +668,7 @@ function reducer(state: GameState, action: Action): GameState {
 
       return {
         ...state,
-        phase: "preparation",
+        phase: "roundEnd",
         turnIndex: nextIndex,
         currentPlayerId: nextId,
         targetPlayerId: null,
@@ -972,20 +972,20 @@ export default function App() {
   const [error, setError] = useState("");
 
   const [game, setGame] = useState<GameState | null>(null);
-  const gameEndAdCountRef = useRef(0);
+  const roundEndAdCountRef = useRef(0);
   const previousGamePhaseRef = useRef<string | null>(null);
 
   useEffect(() => {
     const currentPhase = game?.phase ?? null;
 
     if (
-      currentPhase === "gameEnd" &&
-      previousGamePhaseRef.current !== "gameEnd"
+      currentPhase === "roundEnd" &&
+      previousGamePhaseRef.current !== "roundEnd"
     ) {
-      gameEndAdCountRef.current += 1;
+      roundEndAdCountRef.current += 1;
 
-      // Une publicité toutes les 2 fins de partie.
-      if (gameEndAdCountRef.current % 2 === 0) {
+      // Une publicité toutes les 2 fins de manche.
+      if (roundEndAdCountRef.current % 2 === 0) {
         const adUnitId = __DEV__
           ? TestIds.INTERSTITIAL
           : "ca-app-pub-2733184679900055/8754144837";
