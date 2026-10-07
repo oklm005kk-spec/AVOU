@@ -8,7 +8,10 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.avou.app"
+      "bundleIdentifier": "com.avou.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.avou.app",
@@ -33,7 +36,8 @@
       [
         "react-native-google-mobile-ads",
         {
-          "androidAppId": "ca-app-pub-2733184679900055~7109890678"
+          "androidAppId": "ca-app-pub-2733184679900055~7109890678",
+          "iosAppId": "ca-app-pub-2733184679900055~3215036794"
         }
       ]
     ]
