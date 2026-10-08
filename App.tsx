@@ -1,10 +1,12 @@
 import "react-native-url-polyfill/auto";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  AdEventType,
-  InterstitialAd,
-  TestIds,
-} from "react-native-google-mobile-ads";
+let AdMobModule: any = null;
+
+try {
+  AdMobModule = require("react-native-google-mobile-ads");
+} catch {
+  AdMobModule = null;
+}
 import {
   Alert,
   AppState,
@@ -984,31 +986,38 @@ export default function App() {
     ) {
       roundEndAdCountRef.current += 1;
 
+      // Expo Go ne possède pas le module natif AdMob.
+      // On laisse simplement le jeu continuer sans publicité.
+      if (!AdMobModule) {
+        previousGamePhaseRef.current = currentPhase;
+        return;
+      }
+
       // Une publicité toutes les 2 fins de manche.
       if (roundEndAdCountRef.current % 2 === 0) {
         const adUnitId = __DEV__
-          ? TestIds.INTERSTITIAL
+          ? AdMobModule.TestIds.INTERSTITIAL
           : "ca-app-pub-2733184679900055/8754144837";
 
-        const interstitial = InterstitialAd.createForAdRequest(adUnitId);
+        const interstitial = AdMobModule.InterstitialAd.createForAdRequest(adUnitId);
 
         const unsubscribeLoaded = interstitial.addAdEventListener(
-          AdEventType.LOADED,
+          AdMobModule.AdEventType.LOADED,
           () => {
             interstitial.show();
           }
         );
 
         const unsubscribeClosed = interstitial.addAdEventListener(
-          AdEventType.CLOSED,
+          AdMobModule.AdEventType.CLOSED,
           () => {
             interstitial.load();
           }
         );
 
         const unsubscribeError = interstitial.addAdEventListener(
-          AdEventType.ERROR,
-          (error) => {
+          AdMobModule.AdEventType.ERROR,
+          (error: unknown) => {
             console.log("❌ Erreur publicité interstitielle :", error);
           }
         );
